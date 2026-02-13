@@ -5,5 +5,11 @@
 __pycache__/
 *.pyc
 
+# Pacakging metadata
+*.egg-info/
+*.egg
+dist/
+build/
+
 # output 
 output/
