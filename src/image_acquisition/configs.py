@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional, List
 from pathlib import Path
 from xml.dom import minidom
+import re
 
 
 def get_color_to_channel_dict(microscope='MF3'):
@@ -43,55 +44,7 @@ def get_frame_table(bead_z , bead_seq, color_seq , end_seq, z_pos, microscope='M
             
     return frame_df
 
-def print_frame_table(df):
-    """
-    To easily visualize the structure of the shutter file
-    """
-    
-    # extract the number of frames per z
-    counts = df['z'].value_counts()
-    frames_per_z = min(counts)
-    
-    col_width = 6
-    col_sep = ' '*6
-    
-    # Header
-    header_width = col_width * frames_per_z
-    print(f'{"frames":{header_width}s}{col_sep}'
-          f'{"color":{header_width}s}{col_sep}'
-          f'{"channel":{header_width}s}{col_sep}'
-          f'{"z":{header_width}s}{col_sep}')
-    print()  # blank line
 
-    n = len(df)
-
-    for start in range(0, n, frames_per_z):
-        end = start + frames_per_z
-        group = df.iloc[start:end]
-
-        # Skip incomplete group if desired; remove this if you want to print it
-        if len(group) < frames_per_z:
-            break
-
-        # Frames (index)
-        frames_str = ''.join(f'{int(idx):{col_width}d}' for idx in group.index)
-
-        # Helper for NaNs in int-like columns
-        def fmt_int_like(val):
-            if pd.isna(val):
-                return f'{"nan":>{col_width}}'
-            return f'{int(val):{col_width}d}'
-
-        # Colors
-        colors_str = ''.join(fmt_int_like(v) for v in group['color'])
-
-        # Channels
-        channels_str = ''.join(fmt_int_like(v) for v in group['channel'])
-
-        # z as float with 2 decimals
-        z_str = ''.join(f'{float(v):{col_width}.2f}' for v in group['z'])
-
-        print(f'{frames_str}{col_sep}{colors_str}{col_sep}{channels_str}{col_sep}{z_str}')
         
 def get_color_sequence_name(df):
     """
@@ -296,3 +249,116 @@ def format_z_offsets_from_frame_table(df: pd.DataFrame) -> str:
     text = "\n" + "\n".join(inner_lines) + "\n      "
     return text
 
+def create_hal_config(prefix: str,
+                      frame_table: pd.DataFrame,
+                      default_power: Optional[List[float]] = None,
+                      xml_dir: str or Path = ".",
+                      output_dir: str or Path = ".") -> Path:
+    """
+    Read '{prefix}.xml' as plain text from xml_dir, update:
+      - <frames>            -> len(frame_table)
+      - <default_power>     -> comma-joined default_power (if provided)
+      - <shutters>          -> '{color_sequence_name}_shutter.xml'
+      - <z_offsets>         -> formatted from frame_table['z']
+
+    Then write '{output_dir}/{prefix}-{color_sequence_name}.xml',
+    preserving original comments and overall layout as much as possible,
+    and adding exactly one empty line before each comment for legibility.
+    """
+    xml_dir = Path(xml_dir)
+    output_dir = Path(output_dir)
+
+    in_path = xml_dir / f"{prefix}.xml"
+    with open(in_path, "rb") as f:
+        raw = f.read()
+
+    # Decode and normalize to '\n' internally
+    text = raw.decode("ISO-8859-1").replace("\r\n", "\n")
+
+    # --- 1. frames ---
+    def repl_frames(m):
+        open_tag, _, close_tag = m.groups()
+        return f"{open_tag}{len(frame_table)}{close_tag}"
+
+    text = re.sub(
+        r"(<frames[^>]*>)(.*?)(</frames>)",
+        repl_frames,
+        text,
+        flags=re.DOTALL,
+    )
+
+    # --- 2. default_power (optional) ---
+    if default_power is not None:
+        dp_str = ",".join(str(v) for v in default_power)
+
+        def repl_default_power(m):
+            open_tag, _, close_tag = m.groups()
+            return f"{open_tag}{dp_str}{close_tag}"
+
+        text = re.sub(
+            r"(<default_power[^>]*>)(.*?)(</default_power>)",
+            repl_default_power,
+            text,
+            flags=re.DOTALL,
+        )
+
+    # --- 3. shutters ---
+    seq_name = get_color_sequence_name(frame_table)
+    shutters_value = f"{seq_name}_shutter.xml"
+
+    def repl_shutters(m):
+        open_tag, _, close_tag = m.groups()
+        return f"{open_tag}{shutters_value}{close_tag}"
+
+    text = re.sub(
+        r"(<shutters[^>]*>)(.*?)(</shutters>)",
+        repl_shutters,
+        text,
+        flags=re.DOTALL,
+    )
+
+    # --- 4. z_offsets from frame_table['z'] ---
+    new_z_block = format_z_offsets_from_frame_table(frame_table)
+    # new_z_block should already contain leading/trailing newlines and indentation
+
+    def repl_z_offsets(m):
+        open_tag, _, close_tag = m.groups()
+        return f"{open_tag}{new_z_block}{close_tag}"
+
+    text = re.sub(
+        r"(<z_offsets[^>]*>)(.*?)(</z_offsets>)",
+        repl_z_offsets,
+        text,
+        flags=re.DOTALL,
+    )
+
+    # --- 5. Ensure exactly one empty line before each comment ---
+    # Only add an extra blank line if there isn't already one just before the comment.
+    # Preserve indentation before <!-- by capturing spaces/tabs only.
+    text = re.sub(
+        r"(?<!\n\n)\n([ \t]*)<!--",   # a newline, optional spaces/tabs, then <!--
+        r"\n\n\1<!--",
+        text,
+    )
+
+    # --- 6. Write out with CRLF line endings ---
+    out_path = output_dir / f"{prefix}-{seq_name}.xml"
+    with open(out_path, "w", encoding="ISO-8859-1", newline="") as f:
+        f.write(text.replace("\n", "\r\n"))
+
+    return out_path
+
+def _strip_whitespace_etree(elem):
+    """
+    Remove whitespace-only .text and .tail from an ElementTree tree.
+    This prevents minidom.toprettyxml from inserting extra blank lines.
+    """
+    # Clean children first
+    for child in list(elem):
+        _strip_whitespace_etree(child)
+        if child.tail is not None and not child.tail.strip():
+            child.tail = None
+
+    # Clean this element's text
+    if elem.text is not None and not elem.text.strip():
+        elem.text = None

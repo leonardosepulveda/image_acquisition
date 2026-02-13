@@ -3,6 +3,7 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 from typing import Optional, List
 from pathlib import Path
+import re
 
 def create_hal_config(prefix: str,
                       frame_table: pd.DataFrame,
@@ -119,23 +120,7 @@ def _strip_whitespace_etree(elem):
         elem.text = None
         
     
-def print_xml_raw(path, encoding="ISO-8859-1"):
-    """
-    Print the XML file exactly as it is on disk.
-    - Comments are preserved.
-    - Existing indentation and spacing are preserved.
-    - CRLF line endings are preserved (or optionally normalized).
-    """
-    with open(path, "rb") as f:
-        data = f.read()
 
-    # Option A: preserve original CRLF exactly
-    text = data.decode(encoding)
-    print(text, end="")  # no extra newline at end
-
-    # If you prefer normalized LF for your console instead, use:
-    # text = data.decode(encoding).replace("\r\n", "\n")
-    # print(text, end="")
     
 
 # def read_shutter_file_to_frame_table(filename, microscope='MF3'):
